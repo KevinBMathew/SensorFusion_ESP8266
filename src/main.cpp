@@ -82,7 +82,7 @@ SimpleKalmanFilter kalmanFilter(0.05, 0.05, 10.0);
 
 // SD Card variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_23Jun.csv";
+String csvFileName = "temp_data_23Jun_overnight.csv";
 
 // Time variables
 time_t now;
@@ -462,10 +462,10 @@ float readSTS35() {
 
 // Modified sensor array - removed port 6 sensor and adjusted weights
 SensorPort sensors[] = {
-    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -0.8, 0.25},    // Increased weight
-    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -1.88, 0.2},    // Increased weight
-    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.31, 0.25},    // Same weight
-    {5, &readSHT45, "5.SHT45", -INFINITY, INFINITY, 24, -0.06, 0.3},     // Same weight
+    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.13, 0.2},    // Increased weight
+    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.10, 0.15},    // Increased weight
+    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.76, 0.25},    // Same weight
+    {5, &readSHT45, "5.SHT45", -INFINITY, INFINITY, 24, -0.26, 0.4},     // Same weight
     // Removed: {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.31, 0.1},
 };
 
