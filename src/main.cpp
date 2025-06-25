@@ -82,7 +82,7 @@ SimpleKalmanFilter kalmanFilter(0.05, 0.05, 10.0);
 
 // SD Card variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_24Jun_day.csv";
+String csvFileName = "temp_data_24Jun_overnight.csv";
 
 // Time variables
 time_t now;
@@ -450,8 +450,8 @@ SensorPort sensors[] = {
     {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.32, 0.15},
     {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.94, 0.3},
     {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.26, 0.4},
-    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.91, 0}, // Re-enabled
-    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.3, 0},   // New SHT45 sensor
+    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -1.11, 0}, // Re-enabled
+    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.68, 0},   // New SHT45 sensor
 };
 
 float fuseTemperatures(float temps[], int validCount, int validIndices[]) {
