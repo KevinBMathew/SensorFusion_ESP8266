@@ -196,7 +196,7 @@ const float R_DIAG[NUM_SENSORS] = {
     MEAS_VAR_BME, MEAS_VAR_BME, MEAS_VAR_STS35,
     MEAS_VAR_SHT45, MEAS_VAR_STS35, MEAS_VAR_SHT45
 };
-const float SENSOR_WEIGHTS[NUM_SENSORS] = {0.15, 0.15, 0.15, 0.2, 0.15, 0.2};
+const float SENSOR_WEIGHTS[NUM_SENSORS] = {0.1, 0.1, 0.2, 0.2, 0.2, 0.2};
 WeightedKFAnomaly kalmanFilter(PROCESS_VAR, R_DIAG, SENSOR_WEIGHTS, DROP_THRESHOLD);
 
 // --- Minute Averaging Buffers ---
@@ -205,7 +205,7 @@ uint8_t readingIndex = 0;
 
 // SD Card and Time variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_25Jun_day.csv";
+String csvFileName = "temp_data_25Jun_overnight.csv";
 time_t now;
 tm timeinfo;
 bool timeInitialized = false;
