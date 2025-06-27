@@ -205,7 +205,7 @@ uint8_t readingIndex = 0;
 
 // SD Card and Time variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_25Jun_overnight.csv";
+String csvFileName = "temp_data_27Jun1400hrs_onwards.csv";
 time_t now;
 tm timeinfo;
 bool timeInitialized = false;
@@ -243,12 +243,12 @@ float readSHT45Port7();
 float readSTS35();
 
 SensorPort sensors[] = {
-    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.31},
-    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.18},
-    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.93},
-    {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.36},
-    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.91},
-    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.5}
+    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.3},
+    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.2},
+    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.96},
+    {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.39},
+    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.92},
+    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.48}
 };
 
 // --- Time and WiFi Functions ---
@@ -268,51 +268,187 @@ void printCurrentTime() {
     Serial.println(getFormattedTime());
 }
 
-void initWiFi() {
-    Serial.print("Connecting to WiFi");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(1000);
-        Serial.print(".");
-        attempts++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println();
-        Serial.print("WiFi connected! IP: ");
-        Serial.println(WiFi.localIP());
-        // Initialize NTP and wait for sync
-        configTime(MY_TZ, MY_NTP_SERVER);
-        Serial.println("NTP time sync initiated");
-        // Wait for time to be set with longer timeout
-        int timeAttempts = 0;
-        while (!time(nullptr) && timeAttempts < 30) {
-            delay(1000);
-            Serial.print(".");
-            timeAttempts++;
-        }
-
-        if (time(nullptr)) {
-            timeInitialized = true;
-            Serial.println("\nTime synchronized with NTP server");
-            printCurrentTime();
-            // Add delay to ensure complete sync before disconnecting
-            delay(15000); // 15 second delay for complete sync
-            // Disconnect WiFi after successful time sync
-            Serial.println("Disconnecting WiFi...");
-            WiFi.disconnect(true);
-            WiFi.mode(WIFI_OFF);
-            Serial.println("WiFi turned off");
-            printCurrentTime();
-        } else {
-            Serial.println("\nTime sync failed!");
-        }
-    } else {
-        Serial.println("\nWiFi connection failed! Continuing without time sync.");
-    }
+bool setTimeFromCSVPlusMinutes(String csvLine, int minutesToAdd) {
+  if (csvLine.length() == 0) {
+    Serial.println("Empty CSV line, cannot extract time");
+    return false;
+  }
+  
+  // Find the second comma (after timestamp and datetime)
+  int firstComma = csvLine.indexOf(',');
+  if (firstComma == -1) return false;
+  
+  int secondComma = csvLine.indexOf(',', firstComma + 1);
+  if (secondComma == -1) return false;
+  
+  // Extract the datetime string (YYYY-MM-DD HH:MM:SS format)
+  String datetimeStr = csvLine.substring(firstComma + 1, secondComma);
+  Serial.println("Extracted datetime: " + datetimeStr);
+  
+  // Parse the datetime string: "YYYY-MM-DD HH:MM:SS"
+  if (datetimeStr.length() != 19) return false;
+  
+  int year = datetimeStr.substring(0, 4).toInt();
+  int month = datetimeStr.substring(5, 7).toInt();
+  int day = datetimeStr.substring(8, 10).toInt();
+  int hour = datetimeStr.substring(11, 13).toInt();
+  int minute = datetimeStr.substring(14, 16).toInt();
+  int second = datetimeStr.substring(17, 19).toInt();
+  
+  // Convert to time_t
+  tm timeStruct = {};
+  timeStruct.tm_year = year - 1900;
+  timeStruct.tm_mon = month - 1;
+  timeStruct.tm_mday = day;
+  timeStruct.tm_hour = hour;
+  timeStruct.tm_min = minute;
+  timeStruct.tm_sec = second;
+  
+  time_t lastTime = mktime(&timeStruct);
+  if (lastTime == -1) {
+    Serial.println("Failed to convert time");
+    return false;
+  }
+  
+  // Add the specified minutes (convert to seconds)
+  time_t newTime = lastTime + (minutesToAdd * 60);
+  
+  // Set the system time
+  timeval tv = { newTime, 0 };
+  settimeofday(&tv, NULL);
+  
+  timeInitialized = true;
+  Serial.printf("Time set from CSV + %d minutes: ", minutesToAdd);
+  printCurrentTime();
+  
+  return true;
 }
+
+String readLastCSVLine() {
+  if (!sdCardAvailable) {
+    Serial.println("SD card not available for reading last line");
+    return "";
+  }
+  
+  File csvFile = SD.open(csvFileName, FILE_READ);
+  if (!csvFile) {
+    Serial.println("Failed to open CSV file for reading last line");
+    return "";
+  }
+  
+  size_t fileSize = csvFile.size();
+  if (fileSize <= 100) { // Skip if file is too small (just header)
+    csvFile.close();
+    return "";
+  }
+  
+  String lastLine = "";
+  char ch;
+  int pos = fileSize - 1;
+  
+  // Skip any trailing newlines at the end
+  csvFile.seek(pos);
+  while (pos >= 0) {
+    ch = csvFile.read();
+    if (ch != '\n' && ch != '\r') {
+      break;
+    }
+    pos--;
+    if (pos >= 0) csvFile.seek(pos);
+  }
+  
+  // Read backwards until we find a newline or reach beginning
+  while (pos >= 0) {
+    csvFile.seek(pos);
+    ch = csvFile.read();
+    
+    if (ch == '\n' || ch == '\r') {
+      break;
+    }
+    
+    lastLine = String(ch) + lastLine;
+    pos--;
+  }
+  
+  csvFile.close();
+  Serial.println("Last CSV line: " + lastLine);
+  return lastLine;
+}
+
+
+void attemptCSVTimeFallback() {
+  Serial.println("Attempting to set time from last CSV entry + 2 minutes...");
+  
+  // Ensure SD card is initialized
+  if (!sdCardAvailable) {
+    Serial.println("SD card not available for time fallback");
+    return;
+  }
+  
+  String lastLine = readLastCSVLine();
+  if (lastLine.length() > 0) {
+    if (setTimeFromCSVPlusMinutes(lastLine, 2)) {
+      Serial.println("Successfully set time from CSV file + 2 minutes");
+    } else {
+      Serial.println("Failed to parse time from CSV file");
+    }
+  } else {
+    Serial.println("Could not read last line from CSV file");
+  }
+}
+
+
+void initWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.print("WiFi connected! IP: ");
+    Serial.println(WiFi.localIP());
+    
+    // Initialize NTP and wait for sync
+    configTime(MY_TZ, MY_NTP_SERVER);
+    Serial.println("NTP time sync initiated");
+    
+    int timeAttempts = 0;
+    while (!time(nullptr) && timeAttempts < 30) {
+      delay(1000);
+      Serial.print(".");
+      timeAttempts++;
+    }
+    
+    if (time(nullptr)) {
+      timeInitialized = true;
+      Serial.println("\nTime synchronized with NTP server");
+      printCurrentTime();
+      delay(15000);
+      
+      Serial.println("Disconnecting WiFi...");
+      WiFi.disconnect(true);
+      WiFi.mode(WIFI_OFF);
+      Serial.println("WiFi turned off");
+      printCurrentTime();
+    } else {
+      Serial.println("\nTime sync failed!");
+      // Fall back to CSV time method
+      attemptCSVTimeFallback();
+    }
+  } else {
+    Serial.println("\nWiFi connection failed!");
+    // Fall back to CSV time method
+    attemptCSVTimeFallback();
+  }
+}
+
 
 
 String getTimestamp() {
@@ -659,6 +795,12 @@ void printExtremes() {
 void setup() {
     Serial.begin(115200);
     ESP.wdtEnable(8000);
+    sdCardAvailable = initSDCard();
+    if (sdCardAvailable) {
+        Serial.println("SD card ready for data logging");
+    } else {
+        Serial.println("Continuing without SD card logging");
+    }
     initWiFi();
     Wire.begin(SDA_PIN, SCL_PIN);
     delay(100);
@@ -670,13 +812,6 @@ void setup() {
     pinMode(CLEAR_PIN, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(CLEAR_PIN), clearEEPROMISR, FALLING);
     
-    sdCardAvailable = initSDCard();
-    if (sdCardAvailable) {
-        Serial.println("SD card ready for data logging");
-    } else {
-        Serial.println("Continuing without SD card logging");
-    }
-
     // Initialize averaging buffer
     for (int i = 0; i < NUM_SENSORS; i++) {
         for (int j = 0; j < READINGS_PER_MINUTE; j++) {
