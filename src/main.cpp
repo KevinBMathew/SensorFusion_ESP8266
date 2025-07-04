@@ -338,7 +338,7 @@ uint8_t readingIndex = 0;
 
 // SD Card and Time variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_4Jul_onwards.csv";
+String csvFileName = "temp_data_4Jul_on.csv";
 time_t now;
 tm timeinfo;
 bool timeInitialized = false;
@@ -376,12 +376,12 @@ float readSHT45Port7();
 float readSTS35();
 
 SensorPort sensors[] = {
-    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.3},
-    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.2},
-    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.96},
-    {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.39},
-    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.92},
-    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.48}
+    {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.95},
+    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.95},
+    {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.95},
+    {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.34},
+    {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.87},
+    {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.45}
 };
 
 // --- Time and WiFi Functions ---
