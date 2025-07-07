@@ -338,7 +338,7 @@ uint8_t readingIndex = 0;
 
 // SD Card and Time variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_4Jul_on.csv";
+String csvFileName = "temp_data_7Jul_onwards.csv";
 time_t now;
 tm timeinfo;
 bool timeInitialized = false;
