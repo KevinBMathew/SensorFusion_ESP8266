@@ -12,13 +12,11 @@
 #include <QuickMedianLib.h>
 #include <Arduino.h>
 
-#include "EnhancedFuzzyTemperatureFusion.h"
-
 // WiFi credentials - UPDATE THESE
 #define WIFI_SSID "Galaxy S3"
 #define WIFI_PASSWORD "kevinshotspot"
 
-// NTP Configuration    
+// NTP Configuration
 #define MY_NTP_SERVER "pool.ntp.org"
 #define MY_TZ "IST-5:30"
 
@@ -38,15 +36,301 @@
 
 // System Configuration
 #define EEPROM_SIZE 64
-#define READINGS_PER_INTERVAL 12
+#define NUM_SENSORS 6
+#define READINGS_PER_INTERVAL 12 // 12 readings * 5s interval = 60s
 
+// --- Kalman Filter and Anomaly Detection Parameters ---
+#define WINDOW_SIZE 5
+const float DROP_THRESHOLD = 1.5;
+const float PROCESS_VAR = 0.01;
+const float MEAS_VAR_BME = 0.25 * 0.25; // 0.0625
+const float MEAS_VAR_STS35 = 0.05 * 0.05; // 0.0025
+const float MEAS_VAR_SHT45 = 0.05 * 0.05; // 0.0025
+
+// --- Fuzzy Logic Functions ---
+float m_close(float d) {
+    // Full weight ≤0.1 °C, fade-out to 0.5 °C
+    if (d <= 0.1) {
+        return 1.0;
+    }
+    if (d <= 0.5) {
+        return (0.5 - d) / 0.4;
+    }
+    return 0.0;
+}
+
+float m_moderate(float d) {
+    // Bell between 0.1-0.8 °C, peak around 0.5 °C
+    if (0.1 < d && d <= 0.5) {
+        return (d - 0.1) / 0.4;
+    }
+    if (0.5 < d && d <= 0.8) {
+        return (0.8 - d) / 0.3;
+    }
+    return 0.0;
+}
+
+float dyn_weight(float dev) {
+    // High / Medium / Outlier mapped to 1.0 / 0.3 / 0
+    return 1.0 * m_close(dev) + 0.3 * m_moderate(dev);
+}
+
+// --- Weighted Kalman Filter with Anomaly Detection Class ---
+class WeightedKFAnomaly {
+private:
+    // Filter state
+    float x; // State (fused temperature)
+    float P; // State variance
+    float Q; // Process variance
+    
+    // Sensor-specific parameters
+    float R_diag[NUM_SENSORS];
+    float weights[NUM_SENSORS];
+    
+    // Anomaly detection state
+    float drop_threshold;
+    float sensor_history[NUM_SENSORS][WINDOW_SIZE];
+    uint8_t history_index[NUM_SENSORS];
+    uint8_t history_count[NUM_SENSORS];
+    float prev_valid[NUM_SENSORS];
+    bool first_step;
+
+public:
+    // Constructor
+    WeightedKFAnomaly(float q_val, const float r_vals[], const float w_vals[], float threshold) {
+        Q = q_val;
+        drop_threshold = threshold;
+        memcpy(R_diag, r_vals, sizeof(R_diag));
+        memcpy(weights, w_vals, sizeof(weights));
+        reset();
+    }
+
+    // Reset the filter to its initial state
+    void reset() {
+        x = 25.0; // Initial temperature estimate
+        P = 10.0; // Initial variance
+        first_step = true;
+        
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            prev_valid[i] = 25.0; // Initialize with a reasonable default
+            history_index[i] = 0;
+            history_count[i] = 0;
+            for (int j = 0; j < WINDOW_SIZE; j++) {
+                sensor_history[i][j] = 0.0;
+            }
+        }
+    }
+
+private:
+    // Internal function to detect and correct anomalies
+    void detect_anomalies(const float z[], float z_corrected[]) {
+        if (first_step) {
+            for (int i = 0; i < NUM_SENSORS; i++) {
+                if (!isnan(z[i])) {
+                    prev_valid[i] = z[i];
+                }
+                z_corrected[i] = z[i]; // Use initial reading regardless
+            }
+            first_step = false;
+            return;
+        }
+
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            if (isnan(z[i])) {
+                z_corrected[i] = prev_valid[i]; // Use last good value if current is invalid
+                continue;
+            }
+
+            float expected_temp;
+            if (history_count[i] >= 2) {
+                float sum = 0;
+                for (int j = 0; j < history_count[i]; j++) {
+                    sum += sensor_history[i][j];
+                }
+                expected_temp = sum / history_count[i];
+            } else {
+                expected_temp = prev_valid[i];
+            }
+
+            float temp_drop = expected_temp - z[i];
+            if (temp_drop > drop_threshold) {
+                z_corrected[i] = prev_valid[i];
+                Serial.printf("ANOMALY Sensor %d: Drop of %.1fC detected. Using %.1fC instead of %.1fC\n", i, temp_drop, prev_valid[i], z[i]);
+            } else {
+                z_corrected[i] = z[i];
+                prev_valid[i] = z[i];
+                sensor_history[i][history_index[i]] = z[i];
+                history_index[i] = (history_index[i] + 1) % WINDOW_SIZE;
+                if (history_count[i] < WINDOW_SIZE) {
+                    history_count[i]++;
+                }
+            }
+        }
+    }
+
+public:
+    // Main filter processing step
+    float step(float z[]) {
+        float z_corrected[NUM_SENSORS];
+        detect_anomalies(z, z_corrected);
+        
+        // Prediction
+        P += Q;
+        
+        // Weighted Update (translates the NumPy vector math)
+        float h_dot_h = 0;
+        float w2_dot_r = 0;
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            h_dot_h += weights[i] * weights[i];
+            w2_dot_r += weights[i] * weights[i] * R_diag[i];
+        }
+        
+        float S = P * h_dot_h + w2_dot_r;
+        if (S == 0) return x;
+        
+        float K[NUM_SENSORS];
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            K[i] = (P * weights[i]) / S;
+        }
+        
+        float y[NUM_SENSORS];
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            y[i] = z_corrected[i] - x;
+        }
+        
+        float update_val = 0;
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            update_val += K[i] * (weights[i] * y[i]);
+        }
+        
+        x += update_val;
+        
+        float k_dot_h = 0;
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            k_dot_h += K[i] * weights[i];
+        }
+        
+        P -= k_dot_h * P;
+        
+        return x;
+    }
+};
+
+// --- Combined Kalman-Fuzzy Filter Class ---
+class CombinedKalmanFuzzy {
+private:
+    WeightedKFAnomaly kf;
+    float sensor_weights[NUM_SENSORS];
+    float history[10];
+    uint8_t history_index;
+    uint8_t history_count;
+    const float kalman_weight = 0.3;
+
+public:
+    CombinedKalmanFuzzy(float q_val, const float r_vals[], const float w_vals[], float threshold) 
+        : kf(q_val, r_vals, w_vals, threshold) {
+        memcpy(sensor_weights, w_vals, sizeof(sensor_weights));
+        history_index = 0;
+        history_count = 0;
+        for (int i = 0; i < 10; i++) {
+            history[i] = 0.0;
+        }
+    }
+
+    void reset() {
+        kf.reset();
+        history_index = 0;
+        history_count = 0;
+        for (int i = 0; i < 10; i++) {
+            history[i] = 0.0;
+        }
+    }
+
+    float step(float z[]) {
+        // Step 1: Get Kalman filter estimate
+        float kalman_estimate = kf.step(z);
+        
+        // Step 2: Create augmented measurement vector (z + kalman_estimate)
+        float augmented_measurements[NUM_SENSORS + 1];
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            augmented_measurements[i] = z[i];
+        }
+        augmented_measurements[NUM_SENSORS] = kalman_estimate;
+        
+        // Step 3: Calculate median of augmented measurements
+        float median_val = QuickMedian<float>::GetMedian(augmented_measurements, NUM_SENSORS + 1);
+        
+        // Step 4: Calculate deviations from median
+        float devs[NUM_SENSORS + 1];
+        for (int i = 0; i <= NUM_SENSORS; i++) {
+            devs[i] = fabs(augmented_measurements[i] - median_val);
+        }
+        
+        // Step 5: Create augmented weights (sensor weights + kalman weight)
+        float augmented_weights[NUM_SENSORS + 1];
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            augmented_weights[i] = sensor_weights[i];
+        }
+        augmented_weights[NUM_SENSORS] = kalman_weight;
+        
+        // Step 6: Apply fuzzy logic weighting
+        float fuzzy_weights[NUM_SENSORS + 1];
+        for (int i = 0; i <= NUM_SENSORS; i++) {
+            fuzzy_weights[i] = dyn_weight(devs[i]);
+        }
+        
+        // Step 7: Calculate final weights (fuzzy * base weights)
+        float final_weights[NUM_SENSORS + 1];
+        float weight_sum = 0;
+        for (int i = 0; i <= NUM_SENSORS; i++) {
+            final_weights[i] = fuzzy_weights[i] * augmented_weights[i];
+            weight_sum += final_weights[i];
+        }
+        
+        // Step 8: Normalize weights
+        if (weight_sum > 0) {
+            for (int i = 0; i <= NUM_SENSORS; i++) {
+                final_weights[i] /= weight_sum;
+            }
+        }
+        
+        // Step 9: Calculate combined estimate
+        float combined_estimate = 0;
+        for (int i = 0; i <= NUM_SENSORS; i++) {
+            combined_estimate += final_weights[i] * augmented_measurements[i];
+        }
+        
+        // Step 10: Store in history
+        history[history_index] = combined_estimate;
+        history_index = (history_index + 1) % 10;
+        if (history_count < 10) {
+            history_count++;
+        }
+        
+        // Debug output
+        Serial.printf("Combined Filter - Kalman: %.2f°C, Median: %.2f°C, Final: %.2f°C\n", 
+                     kalman_estimate, median_val, combined_estimate);
+        
+        return combined_estimate;
+    }
+};
+
+// --- Global object definitions ---
 Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_BME680 bme;
 Adafruit_SHT4x sht4;
 DFRobot_STS3X sts(&Wire, STS3X_I2C_ADDRESS_B);
 
-// Replace the combined filter with fuzzy logic
-EnhancedFuzzyTemperatureFusion fuzzyFilter;
+// --- Kalman filter parameters and instance ---
+const float R_DIAG[NUM_SENSORS] = {
+    MEAS_VAR_BME, MEAS_VAR_BME, MEAS_VAR_STS35,
+    MEAS_VAR_SHT45, MEAS_VAR_STS35, MEAS_VAR_SHT45
+};
+
+const float SENSOR_WEIGHTS[NUM_SENSORS] = {0.1, 0.1, 0.18, 0.18, 0.22, 0.22};
+
+// Replace the pure Kalman filter with combined approach
+CombinedKalmanFuzzy combinedFilter(PROCESS_VAR, R_DIAG, SENSOR_WEIGHTS, DROP_THRESHOLD);
 
 // --- 30 Second Averaging Buffers ---
 float sensorReadings[NUM_SENSORS][READINGS_PER_INTERVAL];
@@ -54,7 +338,7 @@ uint8_t readingIndex = 0;
 
 // SD Card and Time variables
 bool sdCardAvailable = false;
-String csvFileName = "temp_data_10Jul_onwards.csv";
+String csvFileName = "temp_data_7Jul_onwards.csv";
 time_t now;
 tm timeinfo;
 bool timeInitialized = false;
@@ -93,13 +377,14 @@ float readSTS35();
 
 SensorPort sensors[] = {
     {0, &readBME680, "0.BME680", -INFINITY, INFINITY, 0, -1.95},
-    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.8},
+    {1, &readBME680, "1.BME680", -INFINITY, INFINITY, 8, -2.95},
     {4, &readSTS35, "4.STS35", -INFINITY, INFINITY, 16, -0.95},
     {5, &readSHT45Port5, "5.SHT45", -INFINITY, INFINITY, 24, -0.34},
     {6, &readSTS35, "6.STS35", -INFINITY, INFINITY, 32, -0.87},
     {7, &readSHT45Port7, "7.SHT45", -INFINITY, INFINITY, 40, -0.45}
 };
 
+// --- Time and WiFi Functions ---
 String getFormattedTime() {
     if (!timeInitialized) {
         return "No Time";
@@ -577,7 +862,7 @@ void clearAllEEPROM() {
     
     fusedMaxTemp = -INFINITY;
     fusedMinTemp = INFINITY;
-    fuzzyFilter.reset();
+    combinedFilter.reset();
     
     // Clear averaging buffers
     readingIndex = 0;
@@ -695,16 +980,38 @@ void initSensors()
     }
 }
 
+// --- Setup Function ---
 void setup() {
     Serial.begin(115200);
-    delay(2000);
+    ESP.wdtEnable(8000);
+    Wire.begin(SDA_PIN, SCL_PIN);
+    delay(100);
+    resetMultiplexer();
+    initSensors();
+    sdCardAvailable = initSDCard();
+    if (sdCardAvailable) {
+        Serial.println("SD card ready for data logging");
+    } else {
+        Serial.println("Continuing without SD card logging");
+    }
     
-    Serial.println("Enhanced Fuzzy Logic Temperature Monitor - Starting...");
+    initWiFi();
+        
+    display.begin(0x3C);
+    display.clearDisplay();
+    display.display();
     
-    // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
+    pinMode(CLEAR_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(CLEAR_PIN), clearEEPROMISR, FALLING);
     
-    // Load stored extremes from EEPROM
+    // Initialize averaging buffer
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        for (int j = 0; j < READINGS_PER_INTERVAL; j++) {
+            sensorReadings[i][j] = 0.0f;
+        }
+    }
+    
     for (auto& sensor : sensors) {
         EEPROM.get(sensor.eepromAddr, sensor.maxTemp);
         EEPROM.get(sensor.eepromAddr + 4, sensor.minTemp);
@@ -717,62 +1024,44 @@ void setup() {
     if (isnan(fusedMaxTemp)) fusedMaxTemp = -INFINITY;
     if (isnan(fusedMinTemp)) fusedMinTemp = INFINITY;
     
-    // Initialize I2C
-    Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(100000);
-    delay(100);
-    
-    // Initialize display
-    if (!display.begin(0x3C, true)) {
-        Serial.println("Display allocation failed!");
-    } else {
-        Serial.println("Display initialized");
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(SH110X_WHITE);
-        display.setCursor(0, 0);
-        display.println("Fuzzy Logic Fusion");
-        display.println("Temperature Monitor");
-        display.println("Initializing...");
-        display.display();
-    }
-    
-    // Initialize SD card
-    sdCardAvailable = initSDCard();
-    
-    // Initialize WiFi and time
-    initWiFi();
-    
-    // Clear EEPROM button setup
-    pinMode(CLEAR_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(CLEAR_PIN), clearEEPROMISR, FALLING);
-    
-    // Initialize sensors
-    initSensors();
-    
-    // Reset fuzzy filter
-    fuzzyFilter.reset();
-    
-    Serial.println("=== ENHANCED FUZZY LOGIC FUSION SYSTEM READY ===");
     updateDisplay();
+    
+    Serial.println("Press and release the FLASH button to clear EEPROM");
+    Serial.println("Serial commands: 'r' - show extremes, 's' - SD card status, 't' - show time");
+    Serial.println("*** COMBINED KALMAN-FUZZY FILTER ACTIVE ***");
 }
 
+// --- Main Loop with 30 Second Averaging ---
 void loop() {
+    ESP.wdtFeed();
     unsigned long currentTime = millis();
+    checkMemory();
     
-    // Handle EEPROM clear request
     if (clearEEPROM) {
         clearEEPROM = false;
         clearAllEEPROM();
+        delay(500);
     }
     
-    // Memory check
-    checkMemory();
+    if (Serial.available()) {
+        char cmd = Serial.read();
+        if (cmd == 'r') { printExtremes(); }
+        else if (cmd == 's') {
+            if (sdCardAvailable) {
+                File csvFile = SD.open(csvFileName);
+                if (csvFile) {
+                    Serial.printf("CSV file size: %u bytes\n", csvFile.size());
+                    csvFile.close();
+                }
+            } else {
+                Serial.println("SD card not available");
+            }
+        }
+        else if (cmd == 't') { printCurrentTime(); }
+    }
     
-    // Sensor reading and fusion
     if (currentTime - lastReadTime >= readInterval) {
         lastReadTime = currentTime;
-        
         Serial.println("----------------------------------------");
         Serial.printf("Collecting readings %d/%d for interval average...\n", readingIndex + 1, READINGS_PER_INTERVAL);
         
@@ -786,13 +1075,14 @@ void loop() {
         for (int i = 0; i < NUM_SENSORS; i++) {
             selectPort(sensors[i].port);
             float rawTemp = sensors[i].readFunc();
+            
             if (!isnan(rawTemp)) {
                 float correctedTemp = rawTemp + sensors[i].correction;
-                sensorReadings[i][readingIndex] = correctedTemp;
-                Serial.printf("  [Port %d] %s: %.2f°C\n", sensors[i].port, sensors[i].name, correctedTemp);
+                sensorReadings[i][readingIndex] = correctedTemp; // Store reading in buffer
+                Serial.printf(" [Port %d] %s: %.2f°C\n", sensors[i].port, sensors[i].name, correctedTemp);
             } else {
-                sensorReadings[i][readingIndex] = NAN;
-                Serial.printf("  [Port %d] %s: Error reading\n", sensors[i].port, sensors[i].name);
+                sensorReadings[i][readingIndex] = NAN; // Store NAN if read fails
+                Serial.printf(" [Port %d] %s: Error reading\n", sensors[i].port, sensors[i].name);
                 currentCycleFailures++;
             }
         }
@@ -803,11 +1093,11 @@ void loop() {
             consecutiveFailures = 0;
         }
         
-        readingIndex++;
+        readingIndex++; // Increment the index for the next reading cycle
         
         // --- 30 Second-End Processing: Triggered when buffer is full ---
         if (readingIndex >= READINGS_PER_INTERVAL) {
-            Serial.println("\n*** One interval elapsed. Calculating averages and fusing data with ENHANCED FUZZY LOGIC... ***");
+            Serial.println("\n*** One interval elapsed. Calculating averages and fusing data with COMBINED KALMAN-FUZZY... ***");
             
             // Step 1: Calculate the average for each sensor over the last interval
             float intervalAverages[NUM_SENSORS];
@@ -823,18 +1113,17 @@ void loop() {
                 
                 if (validReadingCount > 0) {
                     intervalAverages[i] = sum / validReadingCount;
-                    Serial.printf("  - Avg for %s: %.2f°C (%d readings)\n", sensors[i].name, intervalAverages[i], validReadingCount);
+                    Serial.printf(" - Avg for %s: %.2f°C (%d readings)\n", sensors[i].name, intervalAverages[i], validReadingCount);
                 } else {
-                    intervalAverages[i] = NAN;
-                    Serial.printf("  - Avg for %s: FAILED (0 readings)\n", sensors[i].name);
+                    intervalAverages[i] = NAN; // No valid readings this cycle
+                    Serial.printf(" - Avg for %s: FAILED (0 readings)\n", sensors[i].name);
                 }
             }
             
-            // Step 2: Fuse the averaged readings using Enhanced Fuzzy Logic
-            float fusedTemp = fuzzyFilter.fuse_temperature(intervalAverages);
+            // Step 2: Fuse the averaged readings using the COMBINED Kalman-Fuzzy filter
+            float fusedTemp = combinedFilter.step(intervalAverages);
             currentFusedTemp = fusedTemp;
-            
-            Serial.printf("\n*** MINUTE ENHANCED FUZZY FUSED TEMPERATURE: %.2f°C ***\n", fusedTemp);
+            Serial.printf("\n*** MINUTE COMBINED FUSED TEMPERATURE: %.2f°C ***\n", fusedTemp);
             
             // Step 3: Update EEPROM extremes and log to SD card
             updateFusedEEPROM(fusedTemp);
@@ -844,12 +1133,9 @@ void loop() {
                 }
             }
             
-            writeToCSV(intervalAverages, fusedTemp);
+            writeToCSV(intervalAverages, fusedTemp); // Log the AVERAGES, not the raw readings
             
-            // Step 4: Print diagnostics
-            fuzzyFilter.print_diagnostics();
-            
-            // Step 5: Reset the index to start collecting for the next 30 seconds
+            // Step 4: Reset the index to start collecting for the next 30 second
             readingIndex = 0;
             Serial.println("\nBuffer reset. Starting new 30 second cycle.");
         }
@@ -863,3 +1149,4 @@ void loop() {
         }
     }
 }
+// --- Weighted Kalman Filter with Anomaly Detection ---
